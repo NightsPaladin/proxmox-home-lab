@@ -1,0 +1,98 @@
+- name: Configure Ceph's Object Gateway for S3 access
+  hosts: proxmox_main
+  remote_user: root
+  vars_files: ./vars/main.yml
+
+  tasks:
+    - name: Setup Keyring for Object Gateway
+      ansible.builtin.shell:
+        cmd: 'ceph-authtool --create-keyring /etc/ceph/ceph.client.radosgw.keyring'
+        creates: /etc/ceph/ceph.client.radosgw.keyring
+      register: rgw_keyring
+
+    - name: Setup Individual Cluster Host Keys
+      ansible.builtin.shell:
+        cmd: 'ceph-authtool /etc/ceph/ceph.client.radosgw.keyring -n client.radosgw.{{ item.name }} --gen-key'
+      loop: '{{ proxmox_s3_hosts }}'
+      when: rgw_keyring.rc == 0
+
+    - name: Add capabilities to the separate keys/keyring
+      ansible.builtin.shell:
+        cmd: "ceph-authtool -n client.radosgw.{{ item.name }} --cap osd 'allow rwx' --cap mon 'allow rwx' /etc/ceph/ceph.client.radosgw.keyring"
+      loop: '{{ proxmox_s3_hosts }}'
+      when: rgw_keyring.rc == 0
+
+    - name: Add Object Gateway Keys and Keyring to Ceph
+      ansible.builtin.shell:
+        cmd: 'ceph -k /etc/ceph/ceph.client.admin.keyring auth add client.radosgw.{{ item.name }} -i /etc/ceph/ceph.client.radosgw.keyring'
+      loop: '{{ proxmox_s3_hosts }}'
+      when: rgw_keyring.rc == 0
+
+    - name: Information Message
+      ansible.builtin.debug:
+        msg: 'The following task shows a failure for some reason when copying, but does not actually fail.'
+
+    - name: Copy the Object Keyring to Proxmox ClusterFS
+      ansible.builtin.copy:
+        remote_src: true
+        src: /etc/ceph/ceph.client.radosgw.keyring
+        dest: /etc/pve/priv/
+      ignore_errors: true
+
+    - name: Update ceph.conf with new Object Gateway configuration
+      ansible.builtin.blockinfile:
+        dest: /etc/ceph/ceph.conf
+        prepend_newline: true
+        content: |
+          [client.radosgw.{{ item.name }}]
+                  host = {{ item.name }}
+                  keyring = /etc/pve/priv/ceph.client.radosgw.keyring
+                  log file = /var/log/ceph/client.radosgw.{{ item.name }}.log
+                  rgw_dns_name = {{ s3_domain_name }}
+                  rgw_frontends = beast endpoint={{ item.ip }}:7480
+      loop: '{{ proxmox_s3_hosts }}' # It would be nice to auto-collect name and IP from inventory
+
+    - name: Install the Object Gateway Package
+      ansible.builtin.apt:
+        package: radosgw
+        state: present
+
+    - name: Start the Object Gateway Service
+      ansible.builtin.systemd_service:
+        name: radosgw
+        enabled: true
+        state: started
+
+    - name: Add an admin user to Object Gateway
+      ansible.builtin.shell:
+        cmd: radosgw-admin user create --uid=admin --display-name="Admin" --email=chris@gwhome.local
+      register: admin_details
+
+    - name: 'Admin Details'
+      ansible.builtin.debug:
+        var: admin_details
+
+- name: Install Object Gateway package and start the service on other Proxmox hosts
+  hosts: proxmox_others
+  remote_user: root
+
+  tasks:
+    - name: 'Ensure the Object Gateway keyring is present in /etc/ceph/'
+      ansible.builtin.copy:
+        remote_src: true
+        src: /etc/pve/priv/ceph.client.radosgw.keyring
+        dest: /etc/ceph/
+        owner: ceph
+        group: ceph
+        mode: 0600
+
+    - name: 'Install Object Gateway package'
+      ansible.builtin.apt:
+        package: radosgw
+        state: present
+
+    - name: 'Start Object Gateway service'
+      ansible.builtin.systemd_service:
+        name: radosgw
+        enabled: true
+        state: started

@@ -1,0 +1,201 @@
+- name: Proxmox "Base" Host Configuration
+  hosts: proxmox
+  remote_user: root
+  vars_files:
+    - ./vars/main.yml
+    - ./vars/vault.yml
+
+  tasks:
+    - name: Update and Upgrade Packages
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: yes
+      tags: ['update', 'upgrade']
+
+    # Install sudo and configure SSH passwordless access for root and ansible user
+    # Ensure ansible has passwordless sudo access
+    - name: Configure passwordless SSH access and sudo for root and ansible users
+      block:
+        - name: Make sure sudo is installed
+          ansible.builtin.apt:
+            package:
+              - sudo
+            state: present
+
+        - name: Add authorized SSH Keys to "root"
+          ansible.builtin.blockinfile:
+            path: /root/.ssh/authorized_keys
+            insertafter: EOF
+            block: '{{ ssh_keys }}'
+
+        - name: Add normal user "ansible" to host
+          ansible.builtin.user:
+            user: ansible
+            shell: /bin/bash
+
+        - name: Create .ssh directory for "ansible"
+          ansible.builtin.file:
+            path: /home/ansible/.ssh
+            state: directory
+            mode: 0700
+            owner: ansible
+            group: ansible
+
+        - name: Add authorized ssh key to "ansible"
+          ansible.builtin.copy:
+            dest: /home/ansible/.ssh/authorized_keys
+            mode: 0600
+            owner: ansible
+            group: ansible
+            content: '{{ ssh_keys }}'
+
+        - name: Add ansible to sudoers
+          community.general.sudoers:
+            name: ansible-user
+            user: ansible
+            commands: ALL
+      tags: ['sudo', 'ssh']
+
+    - name: Configure Terraform Access
+      block:
+        - name: Remove any existing Terraform ACL
+          ansible.builtin.shell:
+            cmd: pveum acl delete / -user terraform@pve -role Terraform
+          ignore_errors: true
+
+        - name: Remove any existing Terraform role
+          ansible.builtin.shell:
+            cmd: pveum role delete Terraform
+          ignore_errors: true
+
+        - name: Remove any existing Terraform user
+          ansible.builtin.shell:
+            cmd: pveum user delete terraform@pve
+          ignore_errors: true
+
+        - name: Add the Terraform role
+          ansible.builtin.shell:
+            cmd: pveum role add Terraform -privs "Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
+
+        - name: Add the Terraform user
+          ansible.builtin.shell:
+            cmd: 'pveum user add terraform@pve --password {{ terraform_password }}'
+
+        - name: Add an ACL for the Terraform user with the Terraform role
+          ansible.builtin.shell:
+            cmd: pveum acl modify / -user terraform@pve -role Terraform
+      run_once: true
+      tags: ['terraform']
+
+    - block:
+        - name: Ensure python3-pexpect package is installed
+          ansible.builtin.apt:
+            package:
+              - python3-pexpect # required for Ceph install step below
+            state: present
+
+        # These steps were partially taken from https://forum.proxmox.com/threads/ceph-osd-on-lvm-logical-volume.68618/
+        # A more clear and concise guide can be found at https://pve.proxmox.com/wiki/User:Grin/Ceph_Object_Gateway
+        - name: Install Ceph
+          ansible.builtin.expect:
+            command: pveceph install --repository no-subscription --version reef
+            responses:
+              '[Y/n]': y # Answer "yes" to apt's install question
+
+        - name: Initialize Ceph
+          ansible.builtin.shell:
+            cmd: pveceph init --network {{ ceph_network }}
+
+        - name: Create Ceph Monitor
+          ansible.builtin.shell:
+            cmd: pveceph mon create
+          run_once: true
+          ignore_errors: true # For instances where the monitor already exists
+
+        - name: Create Ceph Manager
+          ansible.builtin.shell:
+            cmd: pveceph mgr create
+          run_once: true
+          ignore_errors: true # For instances where the manager already exists (seems to be created by the monitor step)
+
+        - name: Check if Ceph Keyring file already exists
+          ansible.builtin.stat:
+            path: /var/lib/ceph/bootstrap-osd/ceph.keyring
+          register: ceph_keyring
+
+        - name: Create Ceph Keyring
+          ansible.builtin.shell:
+            cmd: ceph auth get client.bootstrap-osd > /var/lib/ceph/bootstrap-osd/ceph.keyring
+          when: not ceph_keyring.stat.exists
+
+        - name: Create LVM partition for Ceph Volume
+          ansible.builtin.shell:
+            cmd: lvcreate -l 100%FREE -n pve/vz
+          when: ansible_lvm['vgs']['vz'] is not defined
+
+        - name: Check if Ceph Volume exists
+          ansible.builtin.shell:
+            cmd: ceph-volume lvm list pve/vz
+          register: ceph_volume
+          failed_when: ceph_volume.rc == 2
+
+        - name: Create Ceph Volume
+          ansible.builtin.shell:
+            cmd: ceph-volume lvm create --data pve/vz
+          when: ceph_volume.rc == 1
+
+        - name: Check if pve-storage Ceph Pool already exists
+          ansible.builtin.shell:
+            cmd: ceph osd pool ls | grep pve-storage
+          register: ceph_pool
+          failed_when: ceph_pool.rc == 2
+
+        - name: Create pool
+          ansible.builtin.shell:
+            cmd: pveceph pool create pve-storage --pg_autoscale_mode on --pg_num 32
+          run_once: true # The pool only need be created once on any of the nodes
+          when: ceph_pool.rc == 1
+
+        - name: Ensure /etc/ceph/ceph.client.admin.keyring is present on all nodes
+          ansible.builtin.copy:
+            remote_src: true
+            src: /etc/pve/priv/ceph.client.admin.keyring
+            dest: /etc/ceph/
+            owner: ceph
+            group: ceph
+            mode: 0600
+
+        - name: Add pve-storage to Proxmox Storage configuration
+          ansible.builtin.shell:
+            cmd: pvesm add rbd pve-storage --content images,rootdir --keyring /etc/ceph/ceph.client.admin.keyring
+          run_once: true
+          ignore_errors: true # Fails if the storage is already configured
+      tags: ['ceph']
+
+    - name: Install a Custom SSL Certificate and Key for Proxmox Web UI
+      block:
+        - name: Copy Custom SSL Certificate
+          ansible.builtin.copy:
+            src: '{{ item }}.crt'
+            dest: '/etc/pve/nodes/{{ item }}/pve-ssl.pem'
+            owner: root
+            group: www-data
+            mode: 0640
+          with_items: "{{ groups['proxmox'] }}"
+
+        - name: Copy Custom SSL Key
+          ansible.builtin.copy:
+            src: '{{ item }}.key'
+            dest: '/etc/pve/nodes/{{ item }}/pve-ssl.key'
+            owner: root
+            group: www-data
+            mode: 0640
+          with_items: "{{ groups['proxmox'] }}"
+      run_once: true # Only needs to be run once against any node (Proxmox will copy to all others)
+      tags: ['ssl_cert', 'ssl', 'cert']
+
+    - name: Restart Proxmox Web/API service
+      ansible.builtin.systemd_service:
+        name: pveproxy.service
+        state: restarted
+      tags: ['ssl_cert', 'ssl', 'cert']

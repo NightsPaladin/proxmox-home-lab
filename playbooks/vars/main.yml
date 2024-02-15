@@ -1,0 +1,7 @@
+# Network to initialize Ceph Configuration with
+ceph_network: 192.168.1.0/24
+# Specify the Proxmox hostnames and IPs to configure RADOS Gateway with
+proxmox_s3_hosts:
+  - { name: pve01, ip: 192.168.1.5 }
+  - { name: pve02, ip: 192.168.1.6 }
+  - { name: pve03, ip: 192.168.1.7 }

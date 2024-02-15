@@ -1,0 +1,15 @@
+pve01 ansible_host=192.168.1.5
+pve02 ansible_host=192.168.1.6
+pve03 ansible_host=192.168.1.7
+
+[proxmox]
+pve01
+pve02
+pve03
+
+[proxmox_main]
+pve01
+
+[proxmox_others]
+pve02
+pve03

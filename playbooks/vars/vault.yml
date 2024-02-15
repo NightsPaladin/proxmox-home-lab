@@ -1,0 +1,4 @@
+terraform_password: 'abcd1234'
+
+ssh_keys: |
+  # Add your SSH Public Keys here
