@@ -1,0 +1,19 @@
+#cloud-config
+hostname: ${vm_name}
+manage_etc_hosts: true
+chpasswd:
+  expire: False
+package_upgrade: true
+packages:
+  - qemu-guest-agent
+users:
+  - name: testuser
+    passwd: None # Hashed Linux password per cloud-init docuemtnation: https://cloudinit.readthedocs.io/en/latest/reference/examples.html
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys: [] # Enter your SSH Keys here
+  - name: ansible
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys: [] # Enter your SSH Keys here
+runcmd:
+  - [systemctl, start, qemu-guest-agent] # Start the QEMU Guest Agent immediately after install

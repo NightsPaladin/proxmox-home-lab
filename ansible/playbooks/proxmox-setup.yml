@@ -54,13 +54,40 @@
             name: ansible-user
             user: ansible
             commands: ALL
+
+        - name: Add normal user "terraform" to host
+          ansible.builtin.user:
+            user: terraform
+            shell: /bin/bash
+
+        - name: Create .ssh directory for "terraform"
+          ansible.builtin.file:
+            path: /home/terraform/.ssh
+            state: directory
+            mode: 0700
+            owner: terraform
+            group: terraform
+
+        - name: Add authorized ssh key to "terraform"
+          ansible.builtin.copy:
+            dest: /home/terraform/.ssh/authorized_keys
+            mode: 0600
+            owner: terraform
+            group: terraform
+            content: '{{ ssh_keys }}'
+
+        - name: Add ansible to sudoers
+          community.general.sudoers:
+            name: terraform-user
+            user: terraform
+            commands: ALL
       tags: ['sudo', 'ssh']
 
     - name: Configure Terraform Access
       block:
         - name: Remove any existing Terraform ACL
           ansible.builtin.shell:
-            cmd: pveum acl delete / -user terraform@pve -role Terraform
+            cmd: pveum acl delete / -user terraform@pam -role Terraform
           ignore_errors: true
 
         - name: Remove any existing Terraform role
@@ -70,20 +97,20 @@
 
         - name: Remove any existing Terraform user
           ansible.builtin.shell:
-            cmd: pveum user delete terraform@pve
+            cmd: pveum user delete terraform@pam
           ignore_errors: true
 
         - name: Add the Terraform role
           ansible.builtin.shell:
-            cmd: pveum role add Terraform -privs "Datastore.AllocateSpace Datastore.Audit Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
+            cmd: pveum role add terraform -privs "Datastore.AllocateSpace Datastore.Audit Datastore.AllocateTemplate Datastore.Allocate Pool.Allocate Sys.Audit Sys.Console Sys.Modify VM.Allocate VM.Audit VM.Clone VM.Config.CDROM VM.Config.Cloudinit VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory VM.Config.Network VM.Config.Options VM.Migrate VM.Monitor VM.PowerMgmt SDN.Use"
 
         - name: Add the Terraform user
           ansible.builtin.shell:
-            cmd: 'pveum user add terraform@pve --password {{ terraform_password }}'
+            cmd: 'pveum user add terraform@pam --password {{ terraform_password }}'
 
         - name: Add an ACL for the Terraform user with the Terraform role
           ansible.builtin.shell:
-            cmd: pveum acl modify / -user terraform@pve -role Terraform
+            cmd: pveum acl modify / -user terraform@pam -role terraform
       run_once: true
       tags: ['terraform']
 
